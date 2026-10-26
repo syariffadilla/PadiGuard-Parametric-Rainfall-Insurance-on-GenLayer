@@ -76,11 +76,13 @@ def test_history_windows_leap_day(guard):
 
 def test_rate_formula(guard):
     mod = contract_module()
-    assert mod._rate_for(0, 5, 1000, 500) == 1000  # floor at pool minimum
-    assert mod._rate_for(1, 5, 1000, 500) == 2500  # 20 % + 5 %
-    assert mod._rate_for(2, 5, 1000, 500) == 4500
-    assert mod._rate_for(5, 5, 1000, 500) == 10000  # capped at 100 %
-    assert mod._rate_for(0, 5, 300, 0) == 300
+    # v1: first argument is the expected payout fraction in bps (untiered: hit rate)
+    assert mod._rate_for(0, 1000, 500) == 1000  # floor at pool minimum
+    assert mod._rate_for(2000, 1000, 500) == 2500  # 20 % + 5 %
+    assert mod._rate_for(4000, 1000, 500) == 4500
+    assert mod._rate_for(10000, 1000, 500) == 10000  # capped at 100 %
+    assert mod._rate_for(0, 300, 0) == 300
+    assert mod._rate_for(1500, 1000, 500) == 2000  # tiered terms: expected payout 15 % + 5 %
     assert mod._premium(10 * GEN, 4500) == 45 * GEN // 10
     assert mod._premium(1, 4500) == 1  # rounds up
     assert mod._premium(15, 1000) == 2
@@ -184,7 +186,7 @@ def _expect_terms_revert(vm, guard, farmer, msg, lat=LAT, lon=LON, start=AUG[0],
                          drought=6000, flood=0, payout=10 * GEN):
     vm.sender = farmer
     with vm.expect_revert(msg):
-        guard.request_quote("1", lat, lon, start, end, drought, flood, payout)
+        guard.request_quote("1", lat, lon, start, end, drought, 0, flood, 0, 0, payout)
 
 
 def test_quote_invalid_coordinates(direct_vm, guard, direct_alice):

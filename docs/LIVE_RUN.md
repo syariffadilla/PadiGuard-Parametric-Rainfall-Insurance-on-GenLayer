@@ -1,4 +1,91 @@
-# Live run on GenLayer Studionet (2026-10-25)
+# Live runs on GenLayer Studionet
+
+* [v1 milestone (2026-10-26)](#v1-milestone-live-run-2026-10-26): new contract with 3 rainfall sources, 2-of-3 settlement and tiered payouts.
+* [v0 accepted version (2026-10-25)](#v0-accepted-version-live-run-on-genlayer-studionet-2026-10-25): kept below unchanged.
+
+# v1 milestone: live run (2026-10-26)
+
+Everything below ran against the **v1** contract on GenLayer Studionet
+(`https://studio.genlayer.com/api`, chain id `0xf22f`). All keys were throwaway
+Studionet keys (the same roles as in v0); balances are Studio test GEN with no real value.
+
+| | |
+|---|---|
+| Contract | `0x4dA4E888B9Eb59227bC948767a0a424A0a8310Bd` |
+| Source | `contracts/padi_guard.py`, sha256 `5db6a2cd3c98c1219d922f80b886e15cf7ad0b59e8618272fe3eea32f54e8818` |
+| On-chain code check | `npm run verify-code` → `MATCH` (code returned by `getContractCode` is byte-identical to the file) |
+| Deploy tx | `0x269c47f2c3a5427a51bcb515ecbcee4b8292eaa1b125164577bb3350c2330167` · FINALIZED · MAJORITY_AGREE (5/5 agree) |
+
+Accounts: insurer `0xd3E7eBD19e1501ee94B8aBE66933Ed5316f47B83`, farmer
+`0x4a2ED8EF12c17B9Ea7D1d6eC4511bbea25213c68` (Node script), browser burner
+`0xF8caAb3Dc756a83c234342E0f116CFCDeD4AD625` (headless Chromium driving the built frontend).
+
+## A. Settlement consensus with three sources: `dry_run_settlement` on past windows
+
+`dry_run_settlement` runs the same code path as `settle()` (`_run_settlement_consensus`:
+leader and validators each fetch Open-Meteo ERA5, NASA POWER and NOAA CPC, validator
+check `_evidence_matches`, deterministic re-check `_check_evidence`) for a past window,
+**without a policy and without moving any GEN**. Location: Tasikmalaya, West Java
+(-7.327400, 108.220700), payout parameter 10 GEN. All four rounds: **FINALIZED ·
+MAJORITY_AGREE (3 agree, 2 idle)**. The rainfall numbers the validators agreed on are
+identical to the fixtures captured with curl for the direct-mode tests.
+
+| # | Tx | Window · terms | Open-Meteo total / max (mm) | NASA POWER | NOAA CPC | Agreed outcome |
+|---|---|---|---|---|---|---|
+| 1 | `0xabccf535f27f0cfaeb6ca5edbec8ed8fa7b361451065f3b0c112d9ac64134fd2` | Aug 2023 · drought < 60 mm pays 50 %, < 10 mm pays 100 % | 48.40 / 8.80 → partial | 13.99 / 5.08 → partial | 7.44 / 3.69 → full | drought **PARTIAL** (Open-Meteo + NASA) → would pay **50 %** = 5 GEN |
+| 2 | `0xbfffef37aa91a03df75d41815b0688e9152a1cc199096468692545b54761ee32` | Jan 2025 · flood: a day > 50 mm | 334.30 / 31.50 → none | 412.46 / 80.55 → full | 470.83 / 57.52 → full | flood **FULL** (NASA + CPC) → would pay 100 %. *The accepted 2-source version deferred this case (sources diverged).* |
+| 3 | `0xdc887feb79f0d1c7676733fc2616ea7227816c996347539f2242ae449bfd8ee2` | Jan 2025 · drought < 450 mm pays 50 %, < 380 mm pays 100 % | → full | → partial | → none | no two sources in the same tier → **DEFER (SOURCES_DIVERGE)**, would pay 0 |
+| 4 | `0x4f6dd20cb8724786989b208aaf6e5b20bcc4e374e799f666351bdee14568ddd5` | 2024-12-20 → 2025-01-10 (crosses New Year: CPC read from the 2024 and 2025 files) · drought < 300 mm | 256.00 / 31.30 → full | 219.01 / 27.23 → full | 250.59 / 57.52 → full | drought **FULL** (all three) → would pay 100 % |
+
+The stored records are readable with `get_dry_run("1")` … `get_dry_run("4")` and are
+shown in the app under **Policies & settlement → Settlement dry runs**
+(`docs/screenshots/dry-runs.png`).
+
+## B. Pool, tiered quote and purchase (Node script `frontend/scripts/e2e.mjs`)
+
+| Step | Tx | Result |
+|---|---|---|
+| `create_pool("West Java Padi Pool (demo)", 1000, 500, West Java box)` + 20 GEN | `0x33a9b552d61514d6f78e52dcab5f14029c3c432ff5889c3319c66acfa7d4fc3d` | FINALIZED · MAJORITY_AGREE · pool `"1"` |
+| `fund_pool("1")` + 5 GEN | `0x6ae148d5bf3ec437c308d4692ff21c196d6657152a37a2d50af62a2faef7f398` | FINALIZED · pool balance 25 GEN |
+| `request_quote("1", -7327400, 108220700, "2026-11-01", "2026-11-30", 30000, 15000, 0, 0, 5000, 2 GEN)` (drought < 300 mm pays 50 %, < 150 mm pays 100 %) | `0xb535333328f67047a356761dff289e0d8117b2c0116b45ed44c9a699c6afe2b3` | **FINALIZED · MAJORITY_AGREE (3 agree, 2 idle)**. History Nov 2021–2025; only Nov 2023 (246.50 mm) is below 300 mm and above 150 mm → would have paid 50 %; per-year `[0, 0, 5000, 0, 0]` bps → expected payout **10 %** → rate 10 % + 5 % loading = **15 %** → premium **0.3 GEN** |
+| `buy_policy("1")` + 0.3 GEN | `0x657e8615b4c58523f0abc152836094d443c63c7a1c437593c031a51d5440673e` | FINALIZED · policy `"1"` (tier terms stored on the policy) |
+| `settle("1")` before the window | `0xbfe9c2c3e05168210fde5d6748a75edbb84114ba50af4f0a2e2d9397b3e25dae` | FINALIZED, execution ERROR **"Settlement not open yet"** (expected: opens 2026-12-07) |
+
+For comparison, the same window with an *untiered* 300 mm trigger was priced at 25 %
+(0.5 GEN) in the v0 live run; the tiered version costs 15 % because the one dry
+year would only have paid half.
+
+## C. Browser (built `frontend/dist`, headless Chromium, `tools/browser_check.py`)
+
+| UI action | Tx | Result |
+|---|---|---|
+| "+10 test GEN" (Studio faucet, `sim_fundAccount`) | `0xd8ef7057fa7a5a9611717f3762786df8603f172530781f4c004db858f2fc18f8` | balance shown |
+| Farmer tab → Request quote: drought < 350 mm pays 40 %, < 250 mm pays 100 %, payout 2 GEN | `0xe56c7da6d48562308fc27e9602ca12e7223e677db36ef2888584fc14897606a5` | **FINALIZED · MAJORITY_AGREE (3 agree, 2 idle)**. Quote #2: Nov 2023 (246.50 mm) would have paid 100 %, other years 0 → expected payout 20 % → rate 25 % → premium 0.5 GEN. The card shows the expected payout (20 % · 0.4 GEN) and "would have paid 100.00 %" for 2023 (`docs/screenshots/quote.png`). |
+| Buy policy · pay 0.5 GEN | `0x144c1b0939b55bf25dd4d4baf492c08a2d8a338e51e2360774adb87d3b92ef90` | FINALIZED · policy `"2"` (`docs/screenshots/bought.png`) |
+| Overview, policy #1 page, dry-run list | (reads) | `docs/screenshots/overview.png`, `policy.png`, `dry-runs.png` |
+
+## Not done live in v1 (and why)
+
+* **No live `settle()` decision on a policy.** A policy can only cover a future
+  window and settlement opens 7 days after it ends. Policies #1 and #2 on the v1
+  contract cover 2026-11-01..30, so `settle()` can first run on **2026-12-07**
+  (deadline 2027-02-05). The three-source settlement consensus has been run live only
+  through `dry_run_settlement` (section A), which uses the same consensus code but
+  moves no money. Partial payouts are covered by direct-mode tests on real data.
+* **A live round with one source actually down.** All three sources answered during
+  this run. "One source unavailable → the other two decide" is covered by
+  direct-mode tests with real captured responses (e.g. the real CPC HTTP 400 for
+  unpublished days and NASA POWER's real `-999` fill values).
+* **MetaMask.** As in v0, the wallet path is implemented but a headless browser has no wallet.
+
+## State after the v1 run
+
+`node scripts/e2e.mjs read` on 2026-10-26: 1 pool (balance 25.8 GEN, 4 GEN reserved),
+2 quotes, 2 policies (both ACTIVE, tiered), 4 dry runs, 0 GEN paid out.
+
+---
+
+# v0 (accepted version): live run on GenLayer Studionet (2026-10-25)
 
 Everything below ran against the deployed contract on GenLayer Studionet
 (`https://studio.genlayer.com/api`, chain id `0xf22f`). All keys were throwaway
@@ -49,7 +136,7 @@ Rainfall history agreed on-chain in quote #2 (Open-Meteo ERA5, Tasikmalaya):
 | 2022-11-01 → 30 | 457.80 mm | 49.60 mm | no |
 | 2021-11-01 → 30 | 460.70 mm | 39.10 mm | no |
 
-Screenshots of these screens are in `docs/screenshots/`.
+Screenshots of these screens were in `docs/screenshots/`. `overview.png`, `policy.png` and `quote.png` were re-taken against the v1 contract on 2026-10-26; the v0 images are in git history at commit `2b11724`.
 
 ## Not done live (and why)
 

@@ -1,7 +1,7 @@
 """Shared helpers for direct-mode tests of PadiGuard.
 
-Web responses for settlement are REAL payloads captured from the two public
-APIs with curl (see tests/direct/fixtures/README.md) for Tasikmalaya, West Java
+Web responses for settlement are REAL payloads captured from the three public
+APIs (Open-Meteo, NASA POWER, NOAA CPC via NOAA PSL OPeNDAP) with curl (see tests/direct/fixtures/README.md) for Tasikmalaya, West Java
 (lat -7.327400, lon 108.220700). The quote tests use real multi-year
 Open-Meteo history captures (om_hist_*.json).
 
@@ -42,6 +42,10 @@ WORLD = (-90000000, 90000000, -180000000, 180000000)
 FUNDED = 100 * GEN
 
 OM_RE = r"archive-api\.open-meteo\.com/v1/archive\?latitude=-7\.327400&longitude=108\.220700&start_date={s}&end_date={e}&daily=precipitation_sum&timezone=auto$"
+CPC_RE = (
+    r"psl\.noaa\.gov/thredds/dodsC/Datasets/cpc_global_precip/precip\.{y}\.nc\.ascii\?precip"
+    r"%5B{t0}:1:{t1}%5D%5B194:1:194%5D%5B216:1:216%5D$"
+)
 NASA_RE = r"power\.larc\.nasa\.gov/api/temporal/daily/point\?parameters=PRECTOTCORR&community=AG&longitude=108\.220700&latitude=-7\.327400&start={s}&end={e}&format=JSON$"
 
 
@@ -64,10 +68,23 @@ def mock_nasa(vm, start, end, body=None, status=200):
     )
 
 
-def mock_month(vm, month: str, start: str, end: str, om_body=None, nasa_body=None):
+def mock_cpc(vm, start, end, body=None, status=200):
+    """Mock the NOAA CPC OPeNDAP request for a window inside ONE calendar year."""
+    s = datetime.date.fromisoformat(start)
+    e = datetime.date.fromisoformat(end)
+    assert s.year == e.year, "use one mock_cpc call per calendar year"
+    jan1 = datetime.date(s.year, 1, 1)
+    vm.mock_web(
+        CPC_RE.format(y=s.year, t0=(s - jan1).days, t1=(e - jan1).days),
+        {"status": status, "body": body or ""},
+    )
+
+
+def mock_month(vm, month: str, start: str, end: str, om_body=None, nasa_body=None, cpc_body=None, cpc_status=200):
     """Register real fixture payloads for a settlement window (optionally overridden)."""
     mock_open_meteo(vm, start, end, om_body if om_body is not None else fixture_text(f"om_{month}.json"))
     mock_nasa(vm, start, end, nasa_body if nasa_body is not None else fixture_text(f"nasa_{month}.json"))
+    mock_cpc(vm, start, end, cpc_body if cpc_body is not None else fixture_text(f"cpc_{month}.txt"), status=cpc_status)
 
 
 def contract_module():
@@ -177,16 +194,19 @@ def guard(direct_vm, direct_deploy, direct_owner, clock):
     return c
 
 
-def quote(vm, c, clock, farmer, start, end, drought=0, flood=0, payout=10 * GEN, pool_id="1", **hist):
+def quote(vm, c, clock, farmer, start, end, drought=0, flood=0, payout=10 * GEN, pool_id="1",
+          drought_severe=0, flood_severe=0, partial_bps=0, **hist):
     mock_history(vm, start, end, clock.state["today"], drought=drought, flood=flood, **hist)
     vm.sender = farmer
     vm.value = 0
-    return c.request_quote(pool_id, LAT, LON, start, end, drought, flood, payout)
+    return c.request_quote(pool_id, LAT, LON, start, end, drought, drought_severe, flood, flood_severe, partial_bps, payout)
 
 
-def buy(vm, c, clock, farmer, start, end, drought=0, flood=0, payout=10 * GEN, pool_id="1", **hist):
+def buy(vm, c, clock, farmer, start, end, drought=0, flood=0, payout=10 * GEN, pool_id="1",
+        drought_severe=0, flood_severe=0, partial_bps=0, **hist):
     """request_quote (no-hit synthetic history unless overridden) + buy_policy."""
-    q = quote(vm, c, clock, farmer, start, end, drought, flood, payout, pool_id, **hist)
+    q = quote(vm, c, clock, farmer, start, end, drought, flood, payout, pool_id,
+              drought_severe, flood_severe, partial_bps, **hist)
     vm.sender = farmer
     vm.value = q["premium"]
     try:

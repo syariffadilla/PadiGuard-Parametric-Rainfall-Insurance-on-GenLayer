@@ -165,7 +165,7 @@ def test_closed_pool_rejects_quotes_and_purchases(direct_vm, clock, guard, direc
     assert guard.get_pool("1")["accepting"] is False
     direct_vm.sender = direct_alice
     with direct_vm.expect_revert("Pool is not accepting new policies"):
-        guard.request_quote("1", LAT, LON, *AUG, 6000, 0, 10 * GEN)
+        guard.request_quote("1", LAT, LON, *AUG, 6000, 0, 0, 0, 0, 10 * GEN)
     direct_vm.sender = direct_owner
     guard.set_pool_accepting("1", True)
     assert buy(direct_vm, guard, clock, direct_alice, *AUG, drought=6000) == "1"
@@ -178,10 +178,10 @@ def test_pool_region_is_enforced(direct_vm, clock, guard, direct_bob, direct_ali
     assert buy(direct_vm, guard, clock, direct_alice, *AUG, drought=6000, pool_id="2") == "1"
     # ... Surabaya (East Java, -7.2575, 112.7521) is not
     with direct_vm.expect_revert("Location outside pool coverage region"):
-        guard.request_quote("2", -7257500, 112752100, *AUG, 6000, 0, 10 * GEN)
+        guard.request_quote("2", -7257500, 112752100, *AUG, 6000, 0, 0, 0, 0, 10 * GEN)
     # one micro-degree south of the box is outside
     with direct_vm.expect_revert("Location outside pool coverage region"):
-        guard.request_quote("2", WEST_JAVA[0] - 1, LON, *AUG, 6000, 0, 10 * GEN)
+        guard.request_quote("2", WEST_JAVA[0] - 1, LON, *AUG, 6000, 0, 0, 0, 0, 10 * GEN)
 
 
 # ---------------------------------------------------------------- isolation between pools
@@ -192,7 +192,7 @@ def test_pools_are_isolated(direct_vm, clock, guard, direct_bob, direct_alice, d
     # pool 2 cannot cover 10 GEN even though pool 1 holds 100 GEN
     direct_vm.sender = direct_alice
     with direct_vm.expect_revert("Insufficient pool liquidity"):
-        guard.request_quote("2", LAT, LON, *AUG, 6000, 0, 10 * GEN)
+        guard.request_quote("2", LAT, LON, *AUG, 6000, 0, 0, 0, 0, 10 * GEN)
     p2 = buy(direct_vm, guard, clock, direct_alice, *AUG, drought=6000, payout=5 * GEN, pool_id="2")
     p1 = buy(direct_vm, guard, clock, direct_alice, *AUG, drought=6000, payout=10 * GEN, pool_id="1")
     assert guard.get_policy(p2)["pool_id"] == "2" and guard.get_policy(p1)["pool_id"] == "1"
@@ -247,7 +247,7 @@ def test_unknown_ids(direct_vm, guard):
     with direct_vm.expect_revert("Unknown pool"):
         guard.get_pool_policies("7")
     with direct_vm.expect_revert("Unknown pool"):
-        guard.request_quote("7", LAT, LON, *AUG, 6000, 0, GEN)
+        guard.request_quote("7", LAT, LON, *AUG, 6000, 0, 0, 0, 0, GEN)
     with direct_vm.expect_revert("Unknown quote"):
         guard.get_quote("1")
     with direct_vm.expect_revert("Unknown quote"):

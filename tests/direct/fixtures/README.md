@@ -45,3 +45,34 @@ Per-window totals / wettest day (hundredths of mm):
 Tests that only exercise settlement or pool accounting use a **synthetic**
 constant-rainfall history built in `conftest.py` (`synthetic_history`), chosen so
 no history year hits the trigger; that keeps their premium at the pool minimum.
+
+## NOAA CPC and cross-year fixtures (added for milestone v1)
+
+Captured with `curl` on 2026-10-26, same location. CPC = NOAA CPC Unified
+Gauge-Based Analysis of Global Daily Precipitation V1.0 RT on NOAA PSL THREDDS
+(OPeNDAP ASCII), grid cell lat index 194 (-7.25), lon index 216 (108.25):
+`https://psl.noaa.gov/thredds/dodsC/Datasets/cpc_global_precip/precip.<YEAR>.nc.ascii?precip%5B<t0>:1:<t1>%5D%5B194:1:194%5D%5B216:1:216%5D`
+
+| File | Year / day-of-year indices | Notes |
+|---|---|---|
+| `cpc_2023-08.txt` | 2023, 212..242 | Aug 2023 |
+| `cpc_2025-01.txt` | 2025, 0..30 | Jan 2025 |
+| `cpc_recent.txt` | 2026, 282..294 | 10–22 Oct 2026 |
+| `cpc_2024-12-20_2024-12-31.txt` | 2024, 354..365 | first file of a window crossing New Year |
+| `cpc_2025-01-01_2025-01-10.txt` | 2025, 0..9 | second file of that window |
+| `cpc_out_of_range.txt` | 2026, 292..302 | real **HTTP 400** body (`stop >= size: 302:297`): days not published yet |
+| `om_2024-12-20_2025-01-10.json` | Open-Meteo, same URL pattern as above | cross-year window |
+| `nasa_2024-12-20_2025-01-10.json` | NASA POWER, same URL pattern as above | cross-year window |
+
+Totals in hundredths of mm (what the contract computes):
+
+| Window | NOAA CPC total / max |
+|---|---|
+| Aug 2023 | 744 / 369 |
+| Jan 2025 | 47083 / 5752 |
+| 10–22 Oct 2026 | 231 / 231 (13 days) |
+| 2024-12-20..31 + 2025-01-01..10 | 9026 + 16033 = 25059 / 5752 |
+| 2024-12-20..2025-01-10, Open-Meteo / NASA POWER | 25600 / 3130 and 21901 / 2723 |
+
+The live Studionet dry runs on 2026-10-26 (docs/LIVE_RUN.md) agreed on exactly these
+numbers.

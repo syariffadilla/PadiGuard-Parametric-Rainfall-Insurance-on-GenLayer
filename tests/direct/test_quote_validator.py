@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from tests.direct.conftest import contract_module, fixture_text, mock_history, quote, synthetic_history
+from tests.direct.conftest import GEN, contract_module, fixture_text, mock_history, quote, synthetic_history
 
 AUG = ("2023-08-01", "2023-08-31")
 AUG_HIST = "om_hist_aug_2018-2022.json"
@@ -98,6 +98,13 @@ TAMPER = [
     (("hit_flags", 3), False),
     (("hits",), 1),
     (("hits",), 0),
+    (("year_payout_bps", 3), 0),
+    (("year_payout_bps", 0), 10000),
+    (("expected_payout_bps",), 0),
+    (("expected_payout_bps",), 4001),
+    (("terms", "drought_mm100"), 5000),
+    (("terms", "partial_bps"), 5000),
+    (("terms", "payout_wei"), 1),
 ]
 
 
@@ -118,7 +125,7 @@ def test_rejects_internally_consistent_lie(direct_vm, quoted):
     t = copy.deepcopy(quoted)
     t["years"][3]["total_mm100"] = 9000
     t["years"][4]["total_mm100"] = 9000
-    t.update(mod._history_decide(t["status"], t["years"], 6000, 15000))
+    t.update(mod._history_decide(t["status"], t["years"], mod._terms(6000, 0, 15000, 0, 0, 10 * GEN)))
     assert t["hits"] == 0
     assert direct_vm.run_validator(leader_result=t) is False
 

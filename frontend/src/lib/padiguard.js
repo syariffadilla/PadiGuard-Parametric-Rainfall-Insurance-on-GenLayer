@@ -55,6 +55,26 @@ export function mmToMm100(s) {
 }
 
 export const mm100ToMm = (v) => (Number(v) / 100).toFixed(2);
+
+/** "50" or "12.5" % -> basis points (int). Empty -> 0. */
+export function pctToBps(s) {
+  const str = String(s ?? "").trim();
+  if (str === "") return 0;
+  if (!/^\d+(\.\d{0,2})?$/.test(str)) throw new Error(`Invalid percentage: ${s}`);
+  const [w, f = ""] = str.split(".");
+  return Number(w) * 100 + Number((f + "00").slice(0, 2));
+}
+
+/** Human description of (optionally tiered) terms from a quote or policy view. */
+export function describeTerms(x) {
+  const d = Number(x.drought_trigger_mm100), ds = Number(x.drought_severe_mm100 || 0);
+  const f = Number(x.flood_trigger_mm100), fs = Number(x.flood_severe_mm100 || 0);
+  const part = bpsToPct(x.partial_bps || 0);
+  const out = [];
+  if (d) out.push(ds ? `drought: total < ${mm100ToMm(d)} mm pays ${part}, < ${mm100ToMm(ds)} mm pays 100 %` : `drought: total < ${mm100ToMm(d)} mm pays 100 %`);
+  if (f) out.push(fs ? `flood: a day > ${mm100ToMm(f)} mm pays ${part}, > ${mm100ToMm(fs)} mm pays 100 %` : `flood: a day > ${mm100ToMm(f)} mm pays 100 %`);
+  return out.join(" · ");
+}
 export const bpsToPct = (v) => (Number(v) / 100).toFixed(2) + " %";
 
 // ------------------------------------------------------------------ clients
@@ -185,6 +205,40 @@ export async function write(client, address, functionName, args = [], value = 0n
 
 // ------------------------------------------------------------------ contract API
 
+/** Terms -> request_quote args. Tiers (v1) are optional: severe levels 0 and
+ * partialBps 0 = untiered (a crossed trigger pays 100 %). */
+export function quoteArgs(t) {
+  return [
+    String(t.poolId),
+    t.latMicro,
+    t.lonMicro,
+    t.startDate,
+    t.endDate,
+    t.droughtMm100 || 0,
+    t.droughtSevereMm100 || 0,
+    t.floodMm100 || 0,
+    t.floodSevereMm100 || 0,
+    t.partialBps || 0,
+    BigInt(t.payoutWei),
+  ];
+}
+
+/** Terms -> dry_run_settlement args (same terms, past window, no pool). */
+export function dryRunArgs(t) {
+  return quoteArgs({ ...t, poolId: "" }).slice(1);
+}
+
+/** Human label for a v1 per-source tier code. */
+export function tierLabel(code) {
+  return { "-2": "no data", "-1": "off", 0: "none", 1: "partial", 2: "full" }[String(code)] ?? String(code);
+}
+
+export const SOURCE_LABELS = {
+  "open-meteo": "Open-Meteo ERA5",
+  "nasa-power": "NASA POWER",
+  "noaa-cpc": "NOAA CPC gauge",
+};
+
 export const api = {
   stats: (c, a) => read(c, a, "get_stats"),
   pools: (c, a, offset = 0, limit = 50) => read(c, a, "list_pools", [offset, limit]),
@@ -206,15 +260,9 @@ export const api = {
   setPoolAccepting: (c, a, id, on, cb) => write(c, a, "set_pool_accepting", [String(id), Boolean(on)], 0n, cb),
   setPoolPricing: (c, a, id, minRateBps, loadingBps, cb) =>
     write(c, a, "set_pool_pricing", [String(id), minRateBps, loadingBps], 0n, cb),
-  requestQuote: (c, a, t, cb) =>
-    write(
-      c,
-      a,
-      "request_quote",
-      [String(t.poolId), t.latMicro, t.lonMicro, t.startDate, t.endDate, t.droughtMm100, t.floodMm100, BigInt(t.payoutWei)],
-      0n,
-      cb,
-    ),
+  requestQuote: (c, a, t, cb) => write(c, a, "request_quote", quoteArgs(t), 0n, cb),
+  dryRun: (c, a, t, cb) => write(c, a, "dry_run_settlement", dryRunArgs(t), 0n, cb),
+  dryRunRecord: (c, a, id) => read(c, a, "get_dry_run", [String(id)]),
   buyPolicy: (c, a, quoteId, premiumWei, cb) => write(c, a, "buy_policy", [String(quoteId)], BigInt(premiumWei), cb),
   cancelPolicy: (c, a, id, cb) => write(c, a, "cancel_policy", [String(id)], 0n, cb),
   settle: (c, a, id, cb) => write(c, a, "settle", [String(id)], 0n, cb),

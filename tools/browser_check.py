@@ -4,7 +4,10 @@
     pip install playwright && python -m playwright install chromium
     python tools/browser_check.py read                      # read-only: overview + policy page
     python tools/browser_check.py farmer <burner_key>       # faucet button + farmer tab
-    python tools/browser_check.py quote  <burner_key> 300   # request_quote via the UI (drought < 300 mm)
+    python tools/browser_check.py quote  <burner_key> 300 150 50   # tiered request_quote via the UI
+                                                            # (drought < 300 mm pays 50 %, < 150 mm pays 100 %)
+    python tools/browser_check.py dryruns                   # read-only: Policies tab, settlement dry-run records
+    python tools/browser_check.py showquote <burner_key>    # re-open the latest quote card (screenshot)
     python tools/browser_check.py buy    <burner_key>       # buy the latest quote via the UI
     python tools/browser_check.py pool   <burner_key>       # open a second insurer pool via the UI
     python tools/browser_check.py fund   <burner_key>       # fund that pool with 1 GEN (prompt dialog)
@@ -61,10 +64,23 @@ with sync_playwright() as p:
     elif step=="quote":
         pg.click("[data-tab=farmer]"); time.sleep(2)
         pg.fill("input[name=drought]", sys.argv[3] if len(sys.argv)>3 else "300")
+        pg.fill("input[name=droughtSevere]", sys.argv[4] if len(sys.argv)>4 else "")
+        pg.fill("input[name=partial]", sys.argv[5] if len(sys.argv)>5 else "")
         pg.click("#quote-form button[type=submit]")
         pg.wait_for_selector("#btn-buy", timeout=105000)
         pg.screenshot(path=SHOTS+"/quote.png", full_page=True)
         print(pg.inner_text("#quote-card")[:1500]); print(pg.inner_text("#txlog"))
+    elif step=="showquote":
+        pg.click("[data-tab=farmer]"); pg.wait_for_selector("[data-showq]", timeout=30000); time.sleep(2)
+        pg.click("[data-showq]"); pg.wait_for_selector("#quote-card .kv", timeout=20000); time.sleep(1)
+        pg.screenshot(path=SHOTS+"/quote.png", full_page=True)
+        print(pg.inner_text("#quote-card")[:1500])
+    elif step=="dryruns":
+        pg.click("[data-tab=policies]"); pg.wait_for_selector("#dry-runs details", timeout=40000)
+        for d in pg.query_selector_all("#dry-runs details"): d.evaluate("e => e.open = true")
+        time.sleep(1)
+        pg.screenshot(path=SHOTS+"/dry-runs.png", full_page=True)
+        print(pg.inner_text("#dry-runs")[:3000])
     elif step=="pool":
         pg.click("[data-tab=insurer]"); time.sleep(2)
         pg.fill("#pool-form input[name=name]", "Java Mutual (demo, 2nd insurer)")
@@ -108,6 +124,8 @@ with sync_playwright() as p:
         time.sleep(4)
         pg.screenshot(path=SHOTS+"/bought.png", full_page=True)
         print(pg.inner_text("#txlog")); print(pg.inner_text("#my-stuff")[:800])
+    hashes=[c.get_attribute("title") for c in pg.query_selector_all("#txlog code")]
+    if hashes: print("TX HASHES", hashes)
     print("\n".join(l for l in logs if "error" in l.lower())[:2000])
     b.close()
 srv.shutdown()

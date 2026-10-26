@@ -51,9 +51,12 @@ def test_expire_before_claim_window_closes_reverts(direct_vm, clock, guard, dire
 
 
 def test_expire_deferred_policy_refunds_premium(direct_vm, clock, guard, direct_alice, direct_bob, transfers):
-    # Jan 2025 flood 50 mm/day: sources diverge beyond tolerance -> DEFER every time
+    # Jan 2025, tiered drought 450 mm (50 %) / 380 mm (100 %): the three sources land in three
+    # different tiers (OM FULL, NASA PARTIAL, CPC NONE) -> no 2-of-3 majority -> DEFER every time.
+    # (Accepted version used flood 50 mm/day, which v1's third source now decides.)
     clock("2024-12-15")
-    pid = buy(direct_vm, guard, clock, direct_alice, *JAN, flood=5000, payout=10 * GEN)
+    pid = buy(direct_vm, guard, clock, direct_alice, *JAN, drought=45000, drought_severe=38000, partial_bps=5000,
+              payout=10 * GEN)
     clock("2025-02-10")
     mock_month(direct_vm, "2025-01", *JAN)
     assert guard.settle(pid)["decision"] == "DEFER"

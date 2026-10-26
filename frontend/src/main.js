@@ -5,15 +5,19 @@ import {
   balanceOf,
   bpsToPct,
   degToMicro,
+  describeTerms,
   genToWei,
   keyClient,
   microToDeg,
   mm100ToMm,
   mmToMm100,
   newBurnerKey,
+  pctToBps,
   readClient,
+  SOURCE_LABELS,
   settlementPhase,
   studioFaucet,
+  tierLabel,
   walletClient,
   weiToGen,
 } from "./lib/padiguard.js";
@@ -251,12 +255,13 @@ function renderOverview() {
       <h1>Rainfall cover settled from public weather data.</h1>
       <p>Insurers open pools. Farmers get a premium priced from the last ${s.quote_years} years of rainfall at their field,
       then buy cover against a dry or a flooded season. After the season, anyone can trigger settlement:
-      GenLayer validators each read public weather data (Open-Meteo ERA5 and NASA POWER), agree on the result,
-      and the contract pays the farmer if a trigger was hit. No claim forms, no adjuster.</p>
+      GenLayer validators each read three public rainfall datasets (Open-Meteo ERA5, NASA POWER and the NOAA CPC gauge analysis),
+      agree on the result, and the contract pays the farmer when at least two of the three datasets show the trigger was hit.
+      Terms can be tiered: a moderate shortfall pays part of the cover, a severe one pays all of it. No claim forms, no adjuster.</p>
       <ol class="steps">
-        <li><b>Quote</b> · validators fetch ${s.quote_years} years of daily rainfall for your location and window and agree how many years would have paid.</li>
+        <li><b>Quote</b> · validators fetch ${s.quote_years} years of daily rainfall for your location and window and agree what each year would have paid; the average is your expected payout.</li>
         <li><b>Buy</b> · pay the quoted premium; the pool reserves your payout.</li>
-        <li><b>Settle</b> · from ${s.settlement_delay_days} days after the window ends, validators read two weather sources and pay, close, or defer.</li>
+        <li><b>Settle</b> · from ${s.settlement_delay_days} days after the window ends, validators read ${(s.settlement_sources || []).length || 3} rainfall sources; ${s.min_agreeing_sources || 2} must agree on the tier, otherwise the decision is deferred.</li>
       </ol>
     </div>
     <div class="tiles">
@@ -266,6 +271,7 @@ function renderOverview() {
       <div class="tile"><span>Pool capital</span><b>${gen(s.total_balance)}</b></div>
       <div class="tile"><span>Reserved for payouts</span><b>${gen(s.total_reserved)}</b></div>
       <div class="tile"><span>Paid to farmers</span><b>${gen(s.total_paid_out)}</b></div>
+      <div class="tile"><span>Settlement dry runs</span><b>${s.dry_run_count ?? 0}</b></div>
     </div>
     <h2>Insurer pools</h2>
     ${poolsTable(state.pools)}
@@ -296,7 +302,7 @@ function renderFarmer() {
   const el = $("#tab-farmer");
   const open = state.pools.filter((p) => p.accepting);
   const [ds, de] = nextMonthWindow();
-  const fv = state.form || { preset: "0", lat: PRESETS[0].lat, lon: PRESETS[0].lon, start: ds, end: de, drought: "150", flood: "", payout: "2" };
+  const fv = state.form || { preset: "0", lat: PRESETS[0].lat, lon: PRESETS[0].lon, start: ds, end: de, drought: "300", droughtSevere: "150", flood: "", floodSevere: "", partial: "50", payout: "2" };
   el.innerHTML = `
     <div class="grid2">
       <form id="quote-form" class="card">
@@ -320,7 +326,13 @@ function renderFarmer() {
           <label>Drought trigger: total rain below (mm)<input name="drought" value="${esc(fv.drought)}" placeholder="empty = off" /></label>
           <label>Flood trigger: wettest day above (mm)<input name="flood" value="${esc(fv.flood)}" placeholder="empty = off" /></label>
         </div>
-        <label>Payout if triggered (GEN)<input name="payout" value="${esc(fv.payout)}" required /></label>
+        <div class="row">
+          <label>Severe drought: below (mm) pays 100 %<input name="droughtSevere" value="${esc(fv.droughtSevere ?? "")}" placeholder="empty = no tier" /></label>
+          <label>Severe flood: a day above (mm) pays 100 %<input name="floodSevere" value="${esc(fv.floodSevere ?? "")}" placeholder="empty = no tier" /></label>
+        </div>
+        <label>Partial payout when only the first trigger is crossed (%)<input name="partial" value="${esc(fv.partial ?? "")}" placeholder="only with a severe level" /></label>
+        <label>Payout (GEN, 100 % tier)<input name="payout" value="${esc(fv.payout)}" required /></label>
+        <p class="muted small">Tiers are optional. Without a severe level, crossing a trigger pays 100 %.</p>
         <p class="muted small">Coverage must start at least 1 day from today (UTC) and last at most 184 days.
         The quote is a GenLayer transaction: validators each fetch the rainfall history themselves, so it takes a minute or two.</p>
         <button class="primary" type="submit">Request quote</button>
@@ -353,7 +365,7 @@ function renderFarmer() {
   f.onsubmit = async (ev) => {
     ev.preventDefault();
     $("#quote-err").textContent = "";
-    state.form = { preset: f.preset.value, lat: f.lat.value, lon: f.lon.value, start: f.start.value, end: f.end.value, drought: f.drought.value, flood: f.flood.value, payout: f.payout.value };
+    state.form = { preset: f.preset.value, lat: f.lat.value, lon: f.lon.value, start: f.start.value, end: f.end.value, drought: f.drought.value, droughtSevere: f.droughtSevere.value, flood: f.flood.value, floodSevere: f.floodSevere.value, partial: f.partial.value, payout: f.payout.value };
     let terms;
     try {
       terms = {
@@ -364,8 +376,19 @@ function renderFarmer() {
         endDate: f.end.value,
         droughtMm100: mmToMm100(f.drought.value),
         floodMm100: mmToMm100(f.flood.value),
+        droughtSevereMm100: mmToMm100(f.droughtSevere.value),
+        floodSevereMm100: mmToMm100(f.floodSevere.value),
+        partialBps: 0,
         payoutWei: genToWei(f.payout.value),
       };
+      if (terms.droughtSevereMm100 && !terms.droughtMm100) throw new Error("A severe drought level needs a drought trigger");
+      if (terms.floodSevereMm100 && !terms.floodMm100) throw new Error("A severe flood level needs a flood trigger");
+      if (terms.droughtSevereMm100 && terms.droughtSevereMm100 >= terms.droughtMm100) throw new Error("Severe drought level must be below the drought trigger");
+      if (terms.floodSevereMm100 && terms.floodSevereMm100 <= terms.floodMm100) throw new Error("Severe flood level must be above the flood trigger");
+      if (terms.droughtSevereMm100 || terms.floodSevereMm100) {
+        terms.partialBps = pctToBps(f.partial.value);
+        if (terms.partialBps <= 0 || terms.partialBps >= 10000) throw new Error("Partial payout must be between 0 and 100 % (exclusive)");
+      }
       if (!terms.poolId) throw new Error("No open pool selected");
       if (!terms.droughtMm100 && !terms.floodMm100) throw new Error("Set at least one trigger");
     } catch (e) {
@@ -391,7 +414,7 @@ function quoteCard(q) {
   const rows = (h.years || [])
     .map(
       (y, i) => `<tr><td>${esc(y.start_date)} → ${esc(y.end_date)}</td><td>${mm100ToMm(y.total_mm100)}</td><td>${mm100ToMm(y.max_mm100)}</td>
-      <td>${y.days}/${y.expected_days}</td><td>${h.hit_flags?.[i] ? '<span class="badge b-amber">would have paid</span>' : "–"}</td></tr>`,
+      <td>${y.days}/${y.expected_days}</td><td>${h.year_payout_bps?.[i] ? `<span class="badge b-amber">would pay ${Number(h.year_payout_bps[i]) / 100}%</span>` : "–"}</td></tr>`,
     )
     .join("");
   return `
@@ -400,8 +423,9 @@ function quoteCard(q) {
       <span>Pool</span><b>#${esc(q.pool_id)}</b>
       <span>Location</span><b>${microToDeg(q.lat_micro)}, ${microToDeg(q.lon_micro)}</b>
       <span>Window</span><b>${esc(q.start_date)} → ${esc(q.end_date)}</b>
-      <span>Triggers</span><b>${Number(q.drought_trigger_mm100) ? `total &lt; ${mm100ToMm(q.drought_trigger_mm100)} mm` : ""}${Number(q.drought_trigger_mm100) && Number(q.flood_trigger_mm100) ? " or " : ""}${Number(q.flood_trigger_mm100) ? `a day &gt; ${mm100ToMm(q.flood_trigger_mm100)} mm` : ""}</b>
-      <span>Historical hits</span><b>${q.hits} of ${q.years} years</b>
+      <span>Terms</span><b>${esc(describeTerms(q))}</b>
+      <span>Historical hits</span><b>${q.hits} of ${q.years} years paid something</b>
+      <span>Expected payout</span><b>${bpsToPct(q.expected_payout_bps ?? 0)} of the payout (average over ${q.years} years) · ${gen((BigInt(q.payout) * BigInt(q.expected_payout_bps ?? 0)) / 10000n)}</b>
       <span>Premium rate</span><b>${bpsToPct(q.rate_bps)}</b>
       <span>Payout</span><b>${gen(q.payout)}</b>
       <span>Premium</span><b class="big">${gen(q.premium)}</b>
@@ -459,7 +483,7 @@ async function renderMyStuff() {
           .reverse()
           .map(
             (q) => `<tr><td>${esc(q.id)}</td><td>#${esc(q.pool_id)}</td><td>${esc(q.start_date)} → ${esc(q.end_date)}</td><td>${q.hits}/${q.years}</td>
-          <td>${bpsToPct(q.rate_bps)}</td><td>${gen(q.premium)}</td><td>${esc(q.valid_until)}</td><td>${q.policy_id ? "#" + esc(q.policy_id) : "–"}</td>
+          <td>${bpsToPct(q.rate_bps)} (exp. ${bpsToPct(q.expected_payout_bps ?? 0)})</td><td>${gen(q.premium)}</td><td>${esc(q.valid_until)}</td><td>${q.policy_id ? "#" + esc(q.policy_id) : "–"}</td>
           <td><button class="ghost" data-showq="${esc(q.id)}">view</button></td></tr>`,
           )
           .join("")}</tbody></table></div>`
@@ -639,7 +663,14 @@ async function renderPolicies() {
         <form id="lookup" class="row"><input name="id" placeholder="policy #" size="6" /><button class="ghost">Open</button></form></div>
       <div id="all-policies"><p class="muted">Loading…</p></div>
     </div>
-    <div id="policy-detail"></div>`;
+    <div id="policy-detail"></div>
+    <div class="card">
+      <h2>Settlement dry runs</h2>
+      <p class="muted small"><code>dry_run_settlement</code> runs the exact settlement consensus (3 sources, 2-of-3, tiers) on a past window,
+      with no policy and no money. Records are public.</p>
+      <div id="dry-runs"><p class="muted">Loading…</p></div>
+    </div>`;
+  renderDryRuns();
   $("#lookup").onsubmit = (ev) => {
     ev.preventDefault();
     const id = ev.target.id.value.trim();
@@ -656,19 +687,58 @@ async function renderPolicies() {
   }
 }
 
-function evidenceView(evJson) {
+function evidenceView(evJson, dryRun = false) {
   if (!evJson) return '<p class="muted">Not settled yet: no evidence recorded.</p>';
   const ev = JSON.parse(evJson);
+  const tiers = Object.fromEntries((ev.source_tiers || []).map((s) => [s.name, s]));
+  const agree = (list) => (list && list.length ? ` · agreed by ${list.map((n) => SOURCE_LABELS[n] || n).join(" + ")}` : "");
   return `
     <div class="kv">
       <span>Decision</span><b>${esc(ev.decision)}${ev.defer_reason ? ` (${esc(ev.defer_reason)})` : ""}</b>
-      <span>Drought component</span><b>${esc(ev.drought)}</b>
-      <span>Flood component</span><b>${esc(ev.flood)}</b>
-      <span>Payout</span><b>${gen(ev.payout_wei)}</b>
+      <span>Drought component</span><b>${esc(ev.drought)}${esc(agree(ev.drought_agree))}</b>
+      <span>Flood component</span><b>${esc(ev.flood)}${esc(agree(ev.flood_agree))}</b>
+      <span>Sources complete</span><b>${ev.sources_ok ?? "?"} of ${ev.sources.length} (2 must agree)</b>
+      <span>${dryRun ? "Would pay (dry run, no money moved)" : "Payout"}</span><b>${bpsToPct(ev.payout_bps ?? 0)} · ${gen(ev.payout_wei)}</b>
     </div>
-    <div class="tablewrap"><table><thead><tr><th>Source</th><th>Status</th><th>Days</th><th>Total mm</th><th>Wettest day mm</th></tr></thead><tbody>
-    ${ev.sources.map((s) => `<tr><td>${esc(s.name)}</td><td>${esc(s.status)}</td><td>${s.days}/${ev.expected_days}</td><td>${mm100ToMm(s.total_mm100)}</td><td>${mm100ToMm(s.max_mm100)}</td></tr>`).join("")}
+    <div class="tablewrap"><table><thead><tr><th>Source</th><th>Status</th><th>Days</th><th>Total mm</th><th>Wettest day mm</th><th>Drought tier</th><th>Flood tier</th></tr></thead><tbody>
+    ${ev.sources
+      .map(
+        (s) => `<tr><td>${esc(SOURCE_LABELS[s.name] || s.name)}</td><td>${esc(s.status)}</td><td>${s.days}/${ev.expected_days}</td><td>${mm100ToMm(s.total_mm100)}</td><td>${mm100ToMm(s.max_mm100)}</td>
+        <td>${esc(tierLabel(tiers[s.name]?.drought_tier ?? "-2"))}</td><td>${esc(tierLabel(tiers[s.name]?.flood_tier ?? "-2"))}</td></tr>`,
+      )
+      .join("")}
     </tbody></table></div>`;
+}
+
+function sourceLinks(urls) {
+  const names = ["Open-Meteo", "NASA POWER"];
+  return urls.map((u, i) => `<a href="${esc(u)}" target="_blank" rel="noopener">${names[i] || `NOAA CPC${urls.length > 3 ? ` (${i - 1})` : ""}`}</a>`).join(" · ");
+}
+
+async function renderDryRuns() {
+  const box = $("#dry-runs");
+  if (!box) return;
+  const n = Number(state.stats?.dry_run_count || 0);
+  if (!n) {
+    box.innerHTML = '<p class="muted">No dry runs yet.</p>';
+    return;
+  }
+  const ids = [];
+  for (let i = n; i >= Math.max(1, n - 9); i--) ids.push(i);
+  try {
+    const rs = await Promise.all(ids.map((i) => api.dryRunRecord(state.rc, state.address, i)));
+    box.innerHTML = rs
+      .map((r) => {
+        const ev = JSON.parse(r.evidence);
+        return `<details><summary>Dry run #${esc(r.id)} · ${microToDeg(r.lat_micro)}, ${microToDeg(r.lon_micro)} · ${esc(r.start_date)} → ${esc(r.end_date)} · <b>${esc(ev.decision)}</b> ${bpsToPct(ev.payout_bps ?? 0)}</summary>
+          <p class="small">${esc(describeTerms({ drought_trigger_mm100: ev.terms.drought_mm100, drought_severe_mm100: ev.terms.drought_severe_mm100, flood_trigger_mm100: ev.terms.flood_mm100, flood_severe_mm100: ev.terms.flood_severe_mm100, partial_bps: ev.terms.partial_bps }))}</p>
+          ${evidenceView(r.evidence, true)}
+          <p class="small">Data: ${sourceLinks(r.source_urls)}</p></details>`;
+      })
+      .join("");
+  } catch (e) {
+    box.innerHTML = `<p class="err-text">${esc(e?.message || e)}</p>`;
+  }
 }
 
 async function showPolicy(id) {
@@ -697,23 +767,22 @@ async function showPolicy(id) {
         <span>Farmer</span><b><code>${esc(p.farmer)}</code></b>
         <span>Location</span><b>${microToDeg(p.lat_micro)}, ${microToDeg(p.lon_micro)}</b>
         <span>Coverage window</span><b>${esc(p.start_date)} → ${esc(p.end_date)}</b>
-        <span>Triggers</span><b>${Number(p.drought_trigger_mm100) ? `drought: total &lt; ${mm100ToMm(p.drought_trigger_mm100)} mm ` : ""}${Number(p.flood_trigger_mm100) ? `flood: a day &gt; ${mm100ToMm(p.flood_trigger_mm100)} mm` : ""}</b>
+        <span>Terms</span><b>${esc(describeTerms(p))}</b>
         <span>Payout / premium</span><b>${gen(p.payout)} / ${gen(p.premium)} (${bpsToPct(p.rate_bps)})</b>
         <span>Settlement window</span><b>${esc(p.settle_opens)} → ${esc(p.settle_deadline)} (UTC)</b>
         <span>Settle attempts</span><b>${p.settle_attempts}</b>
-        <span>Paid</span><b>${gen(p.paid_amount)}</b>
+        <span>Paid</span><b>${gen(p.paid_amount)}${Number(p.paid_bps) ? ` (${bpsToPct(p.paid_bps)})` : ""}</b>
       </div>
       <p>${esc(phaseText)}</p>
       <div class="actions">
-        ${phase === "SETTLE_OPEN" ? '<button id="btn-settle" class="primary">Settle now (validators read 2 weather sources)</button>' : ""}
+        ${phase === "SETTLE_OPEN" ? '<button id="btn-settle" class="primary">Settle now (validators read 3 rainfall sources)</button>' : ""}
         ${phase === "EXPIRABLE" ? '<button id="btn-expire">Expire &amp; refund premium</button>' : ""}
         ${phase === "BEFORE_COVERAGE" && sameAddr(p.farmer, state.me) ? '<button id="btn-cancel">Cancel &amp; refund premium</button>' : ""}
         ${phase !== "SETTLE_OPEN" && p.status === "ACTIVE" ? '<button id="btn-settle-anyway" class="ghost" title="The contract will reject this until settlement opens">Try settle anyway</button>' : ""}
       </div>
       <h3>Settlement evidence</h3>
       ${evidenceView(p.evidence)}
-      <p class="small">Data used at settlement: <a href="${esc(urls[0])}" target="_blank" rel="noopener">Open-Meteo</a> ·
-      <a href="${esc(urls[1])}" target="_blank" rel="noopener">NASA POWER</a></p>
+      <p class="small">Data used at settlement: ${sourceLinks(urls)}</p>
     </div>`;
   const after = async (r) => {
     if (r) {
